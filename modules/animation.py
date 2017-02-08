@@ -6,6 +6,7 @@ from matplotlib.patches import Polygon
 from matplotlib.collections import PatchCollection
 import matplotlib.pyplot as plt
 import numpy as np
+from functools import partial
 
 
 class RelaxationAnimation:
@@ -42,12 +43,18 @@ class RelaxationAnimation:
         """ Set patch shader. """
         self.shader = shader
 
+    def get_clims(self):
+        """ Return minimum and maximum values for color scale throughout animation. """
+        shades = np.concatenate([self.shader(voronoi) for voronoi in self.history])
+        vmin, vmax = shades.min(), shades.max()
+        return vmin, vmax
+
     def initialize_elements(self, ax,
                            point_color='black', point_size=5, point_alpha=0.5,
                            centroid_color='red', centroid_size=5, centroid_alpha=0.5,
                            line_color='black', linewidth=3, line_alpha=0.5,
                            fill_color='black', fill_alpha=0.25,
-                           cmap=plt.cm.Blues, vmin=0, vmax=1):
+                           cmap=plt.cm.Blues, clim=None):
         """
         Initialize plot elements.
 
@@ -57,7 +64,7 @@ class RelaxationAnimation:
         point_size, centroid_size, linewidth (float) - element sizing options
         point_alpha, centroid_alpha, line_alpha, fill_alpha (float) - element opacity options
         cmap (matplotlib colormap) - colormap used to color patches. if None, use fill_color
-        vmin, vmax (float) - bounds for color map
+        clim (tuple) - bounds for color map
         """
 
         # add points, centroids, and ridge line elements to axes
@@ -71,7 +78,9 @@ class RelaxationAnimation:
         # set patch coloring method
         if self.shader is not None:
             patches.set_cmap(cmap)
-            patches.set_clim(vmin, vmax)
+            if clim is None:
+                clim = self.get_clims()
+            patches.set_clim(*clim)
             patches.set_array(np.empty(1))
         else:
             patches.set_color(fill_color)
@@ -105,15 +114,15 @@ class RelaxationAnimation:
 
         # shade regions
         if include_fill:
-            patches = [Polygon(np.array([voronoi.vertices[i] for i in region]), True) for region in voronoi.filtered_regions]
-            if self.shader is not None:
-                colors = self.get_patch_colors(voronoi)
-                patches.set_array(colors)
+            patches = [Polygon([voronoi.vertices[i] for i in region], True) for region in voronoi.filtered_regions]
             self.region_shading.set_paths(patches)
+            if self.shader is not None:
+                colors = self.shader(voronoi)
+                self.region_shading.set_array(colors)
 
     def animate(self, framerate=10,
                 include_points=False, include_centroids=False, include_ridges=True, include_fill=True,
-                shader=None, **kwargs):
+                shader='area', **kwargs):
         """
         Generate animation by sequentially updating plot elements with voronoi region history.
 
@@ -129,16 +138,27 @@ class RelaxationAnimation:
         anim (matplotlib.FuncAnimation)
         """
 
-        # create figure
+        # create and format figure
         fig = plt.figure()
         xlim = self.relaxation.bounding_box[0:2]
         ylim = self.relaxation.bounding_box[2:4]
         ax = plt.axes(xlim=xlim, ylim=ylim)
         ax.set_xticks([]), ax.set_yticks([])
 
-        # initialize plot elements
+        # set shading mechanism
         if shader is not None:
+
+            # check if using a default shading mechanism
+            if shader == 'area':
+                shader = area_shader
+
+            if shader == 'log_area':
+                shader = partial(area_shader, log=True)
+
+            # set shader
             self.set_shader(shader)
+
+        # initialize plot elements
         self.initialize_elements(ax, **kwargs)
 
         # generate animation
@@ -159,3 +179,31 @@ class RelaxationAnimation:
         """
         return self.animate(**kwargs).to_html5_video()
 
+
+def get_polygon_area(x, y):
+    """ Compute area enclosed by a set of points. """
+    return 0.5*np.abs(np.dot(x, np.roll(y,1))-np.dot(y, np.roll(x,1)))
+
+
+def area_shader(voronoi, log=False):
+    """
+    Computes area of each voronoi region.
+
+    Args:
+    voronoi (scipy.spatial.Voronoi object)
+    log (bool) - if True, use log of area
+
+    Returns:
+    areas (array like) - area of each region
+    """
+
+    # get vertices for each region
+    vertices_per_region = [voronoi.vertices[region, :] for region in voronoi.filtered_regions]
+
+    # compute areas
+    areas = np.array([get_polygon_area(*vertices.T) for vertices in vertices_per_region])
+
+    if log:
+        areas = np.log10(areas)
+
+    return areas
