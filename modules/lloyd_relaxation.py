@@ -335,7 +335,10 @@ def plot_vector_field(before, after, **kwargs):
     ax (axes object)
     """
     # create figure
-    fig, ax = plt.subplots()
+    if 'ax' in list(kwargs.keys()):
+        ax = kwargs.pop('ax')
+    else:
+        fig, ax = plt.subplots()
 
     # compute differences
     x, y = before
