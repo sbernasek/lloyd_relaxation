@@ -1,6 +1,5 @@
 
 
-#from lloyd_relaxation import LloydRelaxation
 from matplotlib import animation
 from matplotlib.patches import Polygon
 from matplotlib.collections import PatchCollection
@@ -54,6 +53,7 @@ class RelaxationAnimation:
                            centroid_color='red', centroid_size=5, centroid_alpha=0.5,
                            line_color='black', linewidth=3, line_alpha=0.5,
                            fill_color='black', fill_alpha=0.25,
+                           boundary_color='black', boundary_width=3, boundary_alpha=0.5,
                            cmap=plt.cm.Blues, clim=None):
         """
         Initialize plot elements.
@@ -88,6 +88,47 @@ class RelaxationAnimation:
         # add patch elements to axes
         self.region_shading = ax.add_collection(patches)
 
+        # add border
+        boundary_artist = self.add_boundary(ax, color=boundary_color, width=boundary_width, alpha=boundary_alpha)
+
+    def add_boundary(self, ax, color='black', width=1, alpha=0.5):
+        """
+        Add boundary to axes.
+
+        Args:
+        ax (matplotlib axes)
+        color, width, alpha - line formatting parameters
+
+        Returns:
+        artist (matplotlib artist)
+        """
+        boundary = self.relaxation.boundary
+        boundary = np.append(boundary, boundary[:, 0].reshape(2, 1), axis=1)
+        artist = ax.plot(boundary[0, :], boundary[1, :], '-', color=color, linewidth=width, alpha=alpha)
+        return artist
+
+    def update_ridge_elements(self, voronoi):
+        """ Update ridge line plot elements. """
+        ridges = [voronoi.vertices[region + [region[0]], :] for region in voronoi.filtered_regions]
+        _ = [line[0].set_data(*ridge.T) for ridge, line in zip(ridges, self.ridge_lines)]
+
+    def update_xy_elements(self, voronoi):
+        """ Update xy data plot elements. """
+        self.point_lines[0].set_data(*voronoi.filtered_points.T)
+
+    def update_centroid_elements(self, voronoi):
+        """ Update centroid plot elements. """
+        centroids = self.relaxation._get_centroids(voronoi)
+        self.centroid_lines[0].set_data(*centroids.T)
+
+    def update_fill_elements(self, voronoi):
+        """ Update voronoi region fill plot elements. """
+        patches = [Polygon([voronoi.vertices[i] for i in region], True) for region in voronoi.filtered_regions]
+        self.region_shading.set_paths(patches)
+        if self.shader is not None:
+            colors = self.shader(voronoi)
+            self.region_shading.set_array(colors)
+
     def update_elements(self, voronoi,
                         include_points=False, include_centroids=False, include_ridges=False, include_fill=False):
         """
@@ -98,27 +139,17 @@ class RelaxationAnimation:
         include_points, include_centroids, include_ridges, include_fill (bool) - flags for plot element inclusion
         """
 
-        # plot ridges
         if include_ridges:
-            ridges = [voronoi.vertices[region + [region[0]], :] for region in voronoi.filtered_regions]
-            _ = [line[0].set_data(*ridge.T) for ridge, line in zip(ridges, self.ridge_lines)]
+            self.update_ridge_elements(voronoi)
 
-        # plot points
         if include_points:
-            self.point_lines[0].set_data(*voronoi.filtered_points.T)
+            self.update_xy_elements(voronoi)
 
-        # plot centroids
         if include_centroids:
-            centroids = LloydRelaxation._get_centroids(voronoi)
-            self.centroid_lines[0].set_data(*centroids.T)
+            self.update_centroid_elements(voronoi)
 
-        # shade regions
         if include_fill:
-            patches = [Polygon([voronoi.vertices[i] for i in region], True) for region in voronoi.filtered_regions]
-            self.region_shading.set_paths(patches)
-            if self.shader is not None:
-                colors = self.shader(voronoi)
-                self.region_shading.set_array(colors)
+            self.update_fill_elements(voronoi)
 
     def animate(self, framerate=10,
                 include_points=False, include_centroids=False, include_ridges=True, include_fill=True,
@@ -140,8 +171,7 @@ class RelaxationAnimation:
 
         # create and format figure
         fig = plt.figure()
-        xlim = self.relaxation.bounding_box[0:2]
-        ylim = self.relaxation.bounding_box[2:4]
+        xlim, ylim = self.relaxation.get_boundary_limits()
         ax = plt.axes(xlim=xlim, ylim=ylim)
         ax.set_xticks([]), ax.set_yticks([])
 

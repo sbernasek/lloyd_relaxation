@@ -1,7 +1,10 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from copy import deepcopy
+from operator import mul
+from functools import reduce
 from scipy.spatial import Voronoi
+from matplotlib.path import Path
 from animation import RelaxationAnimation
 
 
@@ -12,27 +15,99 @@ class LloydRelaxation:
     Attributes:
     xycoords_initial (np array) - initial coordinates, retained for comparison
     xycoords (np array) - coordinates after relaxation
-    bounding_box (array like) - values defining rectangular region, i.e. [xmin, xmax, ymin, ymax]
-    boundary (np array) - xy data, including all reflections
+    boundary (np array) - bounding vertices of relaxable region, 2 x M
+    bounding_points (np array) - reflections of xy data about all boundaries
     voronoi (scipy.spatial.Voronoi object) - filtered regions
     """
 
-    def __init__(self, xycoords):
+    def __init__(self, xycoords, boundary_type=None, **kwargs):
         """
         Args:
         xycoords (np array) - xy data
+        boundary_type (str) - type of boundary used, e.g. 'box' or None
+        kwargs: boundary padding arguments
         """
         self.xycoords_initial = xycoords
         self.xycoords = xycoords
-        self.bounding_box, self.boundary, self.voronoi = None, None, None
-        self.update_bounding_box()
-        self.update_boundary()
+        self.boundary = None
+        self.bounding_points = None
+        self.voronoi = None
+        self.set_boundary(boundary_type=boundary_type, **kwargs)
+        self.update_bounding_points()
         self.update_voronoi()
         self.history = []
 
     def reset(self):
         """ Revert to initial values. """
         self.__init__(deepcopy(self.xycoords_initial))
+
+    @staticmethod
+    def get_intervertex_vectors(vertices):
+        """
+        Return vector between sequential clockwise-ordered vertices.
+
+        Args:
+        vertices (np array) - M vertices between which vectors are constructed, 2 x M
+
+        Returns:
+        line_vectors (np array) - vector lying on each line, 2 x M
+        """
+        line_vectors = np.diff(np.append(vertices, vertices[:, 0].reshape(2, 1), axis=1))
+        return line_vectors
+
+    @staticmethod
+    def get_reflection(xycoords, line_points, line_vectors):
+        """
+        Returns reflection of N points about M lines.
+
+        Args:
+        xycoords (np array) - N points to be reflected, 2 x N
+        line_points (np array) - point on each of M lines, 2 x M
+        line_vectors (np array) - vector on each of M lines, 2 x M
+
+        Returns:
+        reflection (np array) - flattened reflection of N points about M lines, 2 x (N x M)
+        """
+
+        # construct tiled vectors
+        x = np.tile(xycoords.reshape(xycoords.shape[0], xycoords.shape[1], 1), (1, 1, line_points.shape[1]))
+        p = np.tile(line_points.reshape(line_points.shape[0], 1, line_points.shape[1]), (1, xycoords.shape[1], 1))
+        d = np.tile(line_vectors.reshape(line_vectors.shape[0], 1, line_vectors.shape[1]), (1, xycoords.shape[1], 1))
+
+        # instantiate dot operation
+        dot = lambda a, b: np.einsum("ijk, ijk->jk", a, b)
+
+        # compute projections
+        projection_magnitudes = dot(x-p, d) / dot(d, d)
+        projection_onto_lines = p + d*np.tile(projection_magnitudes.reshape(1, projection_magnitudes.shape[0], projection_magnitudes.shape[1]), reps=(2, 1, 1))
+
+        #compute reflections
+        reflection = 2*projection_onto_lines - x
+
+        return reflection.reshape(reflection.shape[0], -1)
+
+    @staticmethod
+    def sort_clockwise(xycoords):
+        """ Returns clockwise-sorted xy coordinates. """
+        return xycoords[:, np.argsort(np.arctan2(*(xycoords.T - xycoords.mean(axis=1)).T))]
+
+    @staticmethod
+    def find_edge_regions(voronoi):
+        """ Check whether each region is a border region. """
+        return np.array(list(map(lambda x: -1 in x, np.take(voronoi.regions, voronoi.point_region))))
+
+    @classmethod
+    def _get_boundary(cls, xycoords, dilation=None):
+        """
+        Get points on edge of dataset, then dilate away from centroid.
+        """
+
+        if dilation is None:
+            dilation = 1.01
+
+        edges = cls.sort_clockwise(xycoords[:, cls.find_edge_regions(cls._get_voronoi(xycoords))])
+        centroid = cls.get_centroid_of_region(np.append(edges, edges[:, 0].reshape(2, 1), axis=1).T)
+        return np.apply_along_axis(lambda x: centroid + dilation*(x-centroid), axis=0, arr=edges)
 
     @staticmethod
     def _get_bounding_box(xycoords, pad=0.01):
@@ -44,120 +119,164 @@ class LloydRelaxation:
         pad (float) - translational separation inserted between data and reflection if no bounding_box is provided
 
         Returns:
-        bounding_box (array like) - values defining rectangular region, i.e. [xmin, xmax, ymin, ymax]
+        boundary (np array) - bounding vertices of relaxable region, 2 x M
         """
         xmin, ymin = xycoords.min(axis=1)
         xmax, ymax = xycoords.max(axis=1)
-        bounding_box = np.array([xmin-pad, xmax+pad, ymin-pad, ymax+pad])
-        return bounding_box
-
-    def update_bounding_box(self):
-        """ Update bounding box. """
-        self.bounding_box = self._get_bounding_box(self.xycoords)
-
-    @staticmethod
-    def _get_boundary(xycoords, bounding_box):
-        """
-        Generate rectangular bounded voronoi regions by reflecting all data about each edge of bounding_box.
-
-        Args:
-        xycoords (np array) - xy data
-        bounding_box (array like) - values defining rectangular region, i.e. [xmin, xmax, ymin, ymax]
-
-        Returns:
-        boundary (np array) - xy data, including all reflections
-        """
-
-        # reflect about left boundary
-        points_left = np.copy(xycoords.T)
-        points_left[:, 0] = bounding_box[0] - (points_left[:, 0] - bounding_box[0])
-
-        # reflect about right boundary
-        points_right = np.copy(xycoords.T)
-        points_right[:, 0] = bounding_box[1] + (bounding_box[1] - points_right[:, 0])
-
-        # reflect about bottom boundary
-        points_down = np.copy(xycoords.T)
-        points_down[:, 1] = bounding_box[2] - (points_down[:, 1] - bounding_box[2])
-
-        # reflect about top boundary
-        points_up = np.copy(xycoords.T)
-        points_up[:, 1] = bounding_box[3] + (bounding_box[3] - points_up[:, 1])
-
-        boundary = np.hstack((points_left.T, points_right.T, points_down.T, points_up.T))
-
+        boundary = np.array([[xmin-pad, xmin-pad, xmax+pad, xmax+pad], [ymin-pad, ymax+pad, ymax+pad, ymin-pad]])
         return boundary
 
-    def update_boundary(self):
-        """ Update boundary by reflecting xy-coordinates across the bounding_box edges. """
-        self.boundary = self._get_boundary(self.xycoords, self.bounding_box)
+    def set_boundary(self, boundary_type='box', **kwargs):
+        """ Set boundary. """
+        if boundary_type == 'box':
+            self.boundary = self._get_bounding_box(self.xycoords, **kwargs)
+        else:
+            self.boundary = self._get_boundary(self.xycoords, **kwargs)
 
-    def get_voronoi(self, xycoords, boundary, bounding_box):
+    def get_boundary_limits(self):
+        """ Get lower and upper limits for boundary. """
+        xmin, ymin = self.boundary.min(axis=1)
+        xmax, ymax = self.boundary.max(axis=1)
+        return (xmin, xmax), (ymin, ymax)
+
+    @classmethod
+    def _get_bounding_points(cls, xycoords, boundary):
         """
-        Construct voronoi regions and filter those outside the bounding_box.
+        Construct periodic boundary conditions by reflecting data about each edge of boundary.
 
         Args:
         xycoords (np array) - xy data
-        boundary (np array) - xy data, including all reflections
-        bounding_box (array like) - values defining rectangular region, i.e. [xmin, xmax, ymin, ymax]
+        boundary (np array) - bounding vertices of relaxable region, 2 x M
+
+        Returns:
+        bounding_points (np array) - reflections of xy data about all boundaries, 2 x (N x M)
+        """
+        boundary_vectors = cls.get_intervertex_vectors(boundary)
+        bounding_points = cls.get_reflection(xycoords, boundary, boundary_vectors)
+        return bounding_points
+
+    def update_bounding_points(self):
+        """ Update periodic boundary conditions. """
+        self.bounding_points = self._get_bounding_points(self.xycoords, self.boundary)
+
+    @staticmethod
+    def _get_voronoi(xycoords):
+        return Voronoi(xycoords.T)
+
+    @classmethod
+    def get_voronoi(cls, xycoords, bounding_points, boundary):
+        """
+        Construct voronoi regions and filter those outside the boundary.
+
+        Args:
+        xycoords (np array) - xy data
+        bounding_points (np array) - reflections of xy data about all boundaries, 2 x (N x M)
+        boundary (np array) - bounding vertices of relaxable region, 2 x M
 
         Returns:
         voronoi (scipy.spatial.Voronoi object) - filtered regions
         """
 
         # combine coordinates and boundary points
-        points = np.hstack((xycoords, boundary))
+        points = np.hstack((xycoords, bounding_points))
 
         # construct voronoi regions
-        voronoi = Voronoi(points.T)
+        voronoi = cls._get_voronoi(points)
 
         # filter regions outside of bounding box
-        voronoi.filtered_points = voronoi.points[0:xycoords.shape[1], :]
-        voronoi.filtered_region_indices, voronoi.filtered_regions = self.filter_regions(voronoi, bounding_box)
+        voronoi.filtered_points = cls.filter_points(points, boundary)
+        voronoi.filtered_region_indices, voronoi.filtered_regions = cls.filter_regions(voronoi, boundary)
 
         return voronoi
 
     def update_voronoi(self):
-        """ Get region-filtered Voronoi object. """
-        self.voronoi = self.get_voronoi(self.xycoords, self.boundary, self.bounding_box)
+        """ Get region-filtered voronoi object. """
+        self.voronoi = self.get_voronoi(self.xycoords, self.bounding_points, self.boundary)
 
     @staticmethod
-    def filter_regions(voronoi, bounding_box):
+    def get_vertex_mask(xycoords, vertices):
         """
-        Filter voronoi regions such that only those within the bounding_box are retained.
+        Determines which of N points fall within region enclosed by M vertices.
+
+        Args:
+        xycoords (np array) - points to be checked, 2 x N
+        vertices (np array) - vertices, 2 x M
+
+        Returns:
+        within (np array) - boolean mask, if True point is within region
+        """
+
+        path = Path(vertices.T, closed=False)
+        within = path.contains_points(xycoords.T, radius=-1e-10)
+        return within
+
+    @classmethod
+    def filter_points(cls, xycoords, boundary):
+        """
+        Filter xy coordinates such that only those within the boundary are retained.
+
+        Args:
+        xycoords (np array) - input points, 2 x N
+        boundary (np array) - bounding vertices of relaxable region, 2 x M
+
+        Returns:
+        indices (list) - indices of retained points
+        points (list of lists) - retained points
+        """
+
+        mask = cls.get_vertex_mask(xycoords, boundary)
+        return xycoords[:, mask]
+
+    @classmethod
+    def filter_regions(cls, voronoi, boundary):
+        """
+        Filter voronoi regions such that only those within the boundary are retained.
 
         Args:
         voronoi (scipy.spatial.Voronoi object)
-        bounding_box (array like) - values defining rectangular region, i.e. [xmin, xmax, ymin, ymax]
+        boundary (np array) - bounding vertices of relaxable region, 2 x M
 
         Returns:
         indices (list) - indices of retained regions
         regions (list of lists) - list of vertex indices for each retained region
         """
-        eps = 1e-5
-        indices, regions = [], []
-        for i, region in enumerate(voronoi.regions):
-            flag = True
-            for index in region:
-                if index == -1:
-                    flag = False
-                    break
-                else:
-                    x = voronoi.vertices[index, 0]
-                    y = voronoi.vertices[index, 1]
-                    if not(bounding_box[0] - eps <= x
-                           and x <= bounding_box[1] + eps
-                           and bounding_box[2] - eps <= y
-                           and y <= bounding_box[3] + eps):
-                        flag = False
-                        break
-            if region != [] and flag:
-                indices.append(i)
-                regions.append(region)
+
+        # determine whether each voronoi vertex is within the boundary
+        mask = cls.get_vertex_mask(voronoi.vertices.T, boundary)
+
+        indices, regions = zip(*[(i, region) for i, region in enumerate(voronoi.regions)
+                                 if reduce(mul, mask[region], True) == True
+                                 and region != []
+                                 and -1 not in region])
+
         return indices, regions
 
     @staticmethod
-    def _get_centroids(voronoi):
+    def get_centroid_of_region(vertices):
+        """
+        Get centroid of a set of vertices.
+
+        Args:
+        vertices (np array) - cyclic voronoi vertices for a single region, (N+1) x 2
+
+        Returns:
+        centroid (np array) - 2 x 1
+        """
+
+        # Polygon's signed area, centroid's x and y
+        A, C_x, C_y = 0, 0, 0
+        for i in range(0, len(vertices) - 1):
+            s = (vertices[i, 0] * vertices[i + 1, 1] - vertices[i + 1, 0] * vertices[i, 1])
+            A += s
+            C_x += (vertices[i, 0] + vertices[i + 1, 0]) * s
+            C_y += (vertices[i, 1] + vertices[i + 1, 1]) * s
+        A *= 0.5
+        C_x *= (1.0 / (6.0 * A))
+        C_y *= (1.0 / (6.0 * A))
+        return np.array([[C_x, C_y]])
+
+    @classmethod
+    def _get_centroids(cls, voronoi):
         """
         Get centroids for all voronoi regions within the bounding box.
 
@@ -171,7 +290,7 @@ class LloydRelaxation:
         centroids = []
         for region in voronoi.filtered_regions:
             region_vertices = voronoi.vertices[region + [region[0]], :]
-            centroid = get_centroid_of_region(region_vertices)
+            centroid = cls.get_centroid_of_region(region_vertices)
             centroids.append(list(centroid[0, :]))
 
         # order like existing points
@@ -192,7 +311,7 @@ class LloydRelaxation:
         Returns:
         centroids (np array) - centroids of filtered voronoi cells, ordered by position in xycoords
         """
-        self.update_boundary()
+        self.update_bounding_points()
         self.update_voronoi()
         centroids = self.get_centroids()
         return centroids.T
@@ -215,7 +334,7 @@ class LloydRelaxation:
 
     @staticmethod
     def _plot_xy(voronoi, ax, point_color='blue', point_alpha=0.5):
-        artist = ax.plot(voronoi.filtered_points[:, 0], voronoi.filtered_points[:, 1], '.', color=point_color, alpha=point_alpha)
+        artist = ax.plot(voronoi.filtered_points[0, :], voronoi.filtered_points[1, :], '.', color=point_color, alpha=point_alpha)
         return artist
 
     @staticmethod
@@ -235,7 +354,6 @@ class LloydRelaxation:
             artist = ax.plot(vertices[:, 0], vertices[:, 1], '-', color=ridge_color, alpha=ridge_alpha)
             artists.append(artist)
         return artists
-
 
     @staticmethod
     def _plot_voronoi_regions(voronoi, ax=None,
@@ -267,18 +385,10 @@ class LloydRelaxation:
         # Plot ridges
         ridge_artists = LloydRelaxation._plot_ridges(voronoi, ax, ridge_color=ridge_color, ridge_alpha=ridge_alpha)
 
-        xmin, ymin = voronoi.filtered_points.min(axis=0)
-        xmax, ymax = voronoi.filtered_points.max(axis=0)
+        xmin, ymin = voronoi.filtered_points.min(axis=1)
+        xmax, ymax = voronoi.filtered_points.max(axis=1)
         ax.set_xlim(xmin, xmax), ax.set_ylim(ymin, ymax)
         return point_artists
-
-    def plot_translation_field(self, **kwargs):
-        """
-        Plot vector field of line-segments between initial and relaxed xy coordinates.
-
-        kwargs: quiver plot formatting arguments
-        """
-        plot_vector_field(self.xycoords_initial, self.xycoords, **kwargs)
 
     def plot_voronoi_regions(self, **kwargs):
         """
@@ -288,6 +398,46 @@ class LloydRelaxation:
         """
         artists = self._plot_voronoi_regions(self.voronoi, **kwargs)
 
+    @staticmethod
+    def plot_vector_field(before, after, **kwargs):
+        """
+        Plot vector field of line-segments between two ordered arrays of xy coordinates.
+
+        Args:
+        before, after (np array) - xy coordinates
+        kwargs: quiver formatting arguments
+
+        Returns:
+        ax (axes object)
+        """
+        # create figure
+        if 'ax' in list(kwargs.keys()):
+            ax = kwargs.pop('ax')
+        else:
+            fig, ax = plt.subplots()
+
+        # compute differences
+        x, y = before
+        u, v = after - before
+
+        # plot vector field
+        ax.quiver(x, y, u, v, units='xy', scale=1, **kwargs)
+
+        # set aspect ratio and plot limits
+        _ = plt.axis('equal')
+        xmin, ymin = np.hstack((before, after)).min(axis=1)
+        xmax, ymax = np.hstack((before, after)).max(axis=1)
+        ax.set_xlim(xmin, xmax), ax.set_ylim(ymin, ymax)
+        return ax
+
+    def plot_translation_field(self, **kwargs):
+        """
+        Plot vector field of line-segments between initial and relaxed xy coordinates.
+
+        kwargs: quiver plot formatting arguments
+        """
+        self.plot_vector_field(self.xycoords_initial, self.xycoords, **kwargs)
+
     def get_video(self, **kwargs):
         """
         Get HTML5 video of relaxation.
@@ -295,61 +445,3 @@ class LloydRelaxation:
         kwargs: video formatting arguments
         """
         return RelaxationAnimation(self).get_video(**kwargs)
-
-
-# additional utility functions
-
-def get_centroid_of_region(vertices):
-    """
-    Get centroid of a set of vertices.
-
-    Args:
-    vertices (np array) - voronoi vertices for a single region
-
-    Returns:
-    centroid (np array)
-    """
-
-    # Polygon's signed area, centroid's x and y
-    A, C_x, C_y = 0, 0, 0
-    for i in range(0, len(vertices) - 1):
-        s = (vertices[i, 0] * vertices[i + 1, 1] - vertices[i + 1, 0] * vertices[i, 1])
-        A += s
-        C_x += (vertices[i, 0] + vertices[i + 1, 0]) * s
-        C_y += (vertices[i, 1] + vertices[i + 1, 1]) * s
-    A *= 0.5
-    C_x *= (1.0 / (6.0 * A))
-    C_y *= (1.0 / (6.0 * A))
-    return np.array([[C_x, C_y]])
-
-
-def plot_vector_field(before, after, **kwargs):
-    """
-    Plot vector field of line-segments between two ordered arrays of xy coordinates.
-
-    Args:
-    before, after (np array) - xy coordinates
-    kwargs: quiver formatting arguments
-
-    Returns:
-    ax (axes object)
-    """
-    # create figure
-    if 'ax' in list(kwargs.keys()):
-        ax = kwargs.pop('ax')
-    else:
-        fig, ax = plt.subplots()
-
-    # compute differences
-    x, y = before
-    u, v = after - before
-
-    # plot vector field
-    ax.quiver(x, y, u, v, units='xy', scale=1, **kwargs)
-
-    # set aspect ratio and plot limits
-    _ = plt.axis('equal')
-    xmin, ymin = np.hstack((before, after)).min(axis=1)
-    xmax, ymax = np.hstack((before, after)).max(axis=1)
-    ax.set_xlim(xmin, xmax), ax.set_ylim(ymin, ymax)
-    return ax
