@@ -60,9 +60,9 @@ class RelaxationAnimation:
 
         Args:
         ax (axes object) - axis on which animation will occur
-        point_color, centroid_color, line_color, fill_color (str) - element color options
-        point_size, centroid_size, linewidth (float) - element sizing options
-        point_alpha, centroid_alpha, line_alpha, fill_alpha (float) - element opacity options
+        point_color, centroid_color, line_color, fill_color, boundary_color (str) - element color options
+        point_size, centroid_size, linewidth, boundary_width (float) - element sizing options
+        point_alpha, centroid_alpha, line_alpha, fill_alpha, boundary_alpha (float) - element opacity options
         cmap (matplotlib colormap) - colormap used to color patches. if None, use fill_color
         clim (tuple) - bounds for color map
         """

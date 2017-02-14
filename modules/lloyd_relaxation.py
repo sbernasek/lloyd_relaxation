@@ -20,7 +20,7 @@ class LloydRelaxation:
     voronoi (scipy.spatial.Voronoi object) - filtered regions
     """
 
-    def __init__(self, xycoords, boundary_type=None, **kwargs):
+    def __init__(self, xycoords, **kwargs):
         """
         Args:
         xycoords (np array) - xy data
@@ -32,14 +32,15 @@ class LloydRelaxation:
         self.boundary = None
         self.bounding_points = None
         self.voronoi = None
-        self.set_boundary(boundary_type=boundary_type, **kwargs)
+        self.init_params = kwargs
+        self.set_boundary(**kwargs)
         self.update_bounding_points()
         self.update_voronoi()
         self.history = []
 
     def reset(self):
         """ Revert to initial values. """
-        self.__init__(deepcopy(self.xycoords_initial))
+        self.__init__(deepcopy(self.xycoords_initial), **self.init_params)
 
     @staticmethod
     def get_intervertex_vectors(vertices):
@@ -97,41 +98,79 @@ class LloydRelaxation:
         return np.array(list(map(lambda x: -1 in x, np.take(voronoi.regions, voronoi.point_region))))
 
     @classmethod
-    def _get_boundary(cls, xycoords, dilation=None):
+    def _get_edges(cls, xycoords):
         """
-        Get points on edge of dataset, then dilate away from centroid.
+        Get array of points on edge of voronoi region constructed about xycoords.
+
+        Args:
+        xycoords (np array) - xy data, 2 x N
+
+        Returns:
+        edges (np array) - 2 x M
         """
-
-        if dilation is None:
-            dilation = 1.01
-
         edges = cls.sort_clockwise(xycoords[:, cls.find_edge_regions(cls._get_voronoi(xycoords))])
-        centroid = cls.get_centroid_of_region(np.append(edges, edges[:, 0].reshape(2, 1), axis=1).T)
-        return np.apply_along_axis(lambda x: centroid + dilation*(x-centroid), axis=0, arr=edges)
+        return edges
 
     @staticmethod
-    def _get_bounding_box(xycoords, pad=0.01):
+    def _get_bounding_box(xycoords):
         """
-        Get bounds of rectangular region encompassing xy data.
+        Get edges of rectangular region encompassing xy data.
 
         Args:
         xycoords (np array) - xy data
-        pad (float) - translational separation inserted between data and reflection if no bounding_box is provided
 
         Returns:
         boundary (np array) - bounding vertices of relaxable region, 2 x M
         """
         xmin, ymin = xycoords.min(axis=1)
         xmax, ymax = xycoords.max(axis=1)
-        boundary = np.array([[xmin-pad, xmin-pad, xmax+pad, xmax+pad], [ymin-pad, ymax+pad, ymax+pad, ymin-pad]])
+        edges = np.array([[xmin, xmin, xmax, xmax], [ymin, ymax, ymax, ymin]])
+        return edges
+
+    @staticmethod
+    def _get_bounding_circle(xycoords):
+        """ Get edges of circular region encompassing xy data. """
+        center = xycoords.mean(axis=1).reshape(2, 1)
+        radius = np.sqrt(((xycoords-center)**2).sum(axis=0)).max()
+        theta = np.arange(0, 1.95*np.pi, 0.1)[::-1]
+        edges = np.vstack((radius*np.cos(theta), radius*np.sin(theta))) + center
+        return edges
+
+    @classmethod
+    def _get_boundary(cls, edges, dilation=1.01):
+        """
+        Construct boundary from points on edge of dataset, dilated away from centroid.
+
+        Args:
+        edges (np array) - 2 x M
+
+        Returns:
+        boundary (np array) - bounding vertices of relaxable region, 2 x M
+        """
+        centroid = cls.get_centroid_of_region(np.append(edges, edges[:, 0].reshape(2, 1), axis=1).T)
+        boundary = np.apply_along_axis(lambda x: centroid + dilation*(x-centroid), axis=0, arr=edges)
         return boundary
 
-    def set_boundary(self, boundary_type='box', **kwargs):
-        """ Set boundary. """
-        if boundary_type == 'box':
-            self.boundary = self._get_bounding_box(self.xycoords, **kwargs)
+    @classmethod
+    def get_edges(cls, xycoords, boundary_type=None):
+        """ Get edges for boundary. """
+
+        # rectangular
+        if boundary_type in ('box', 'rectangular', 'square'):
+            return cls._get_bounding_box(xycoords)
+
+        # circular
+        elif boundary_type in ('circle', 'circular', 'round'):
+            return cls._get_bounding_circle(xycoords)
+
+        # empirical
         else:
-            self.boundary = self._get_boundary(self.xycoords, **kwargs)
+            return cls._get_edges(xycoords)
+
+    def set_boundary(self, boundary_type=None, dilation=1.001):
+        """ Set boundary. """
+        edges = self.get_edges(self.xycoords, boundary_type=boundary_type)
+        self.boundary = self._get_boundary(edges=edges, dilation=dilation)
 
     def get_boundary_limits(self):
         """ Get lower and upper limits for boundary. """
